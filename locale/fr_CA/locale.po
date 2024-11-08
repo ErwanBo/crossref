@@ -11,6 +11,9 @@ msgstr ""
 "PO-Revision-Date: 2019-09-30T07:09:53-07:00\n"
 "Language: \n"
 
+msgid "plugins.importexport.crossref.displayName"
+msgstr "Plugiciel d'export Crossref"
+
 msgid "plugins.importexport.users.displayName"
 msgstr "Plugiciel XML pour utilisateurs"
 

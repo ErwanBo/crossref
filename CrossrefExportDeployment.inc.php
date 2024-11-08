@@ -19,7 +19,10 @@ define('CROSSREF_XMLNS_AI' , 'http://www.crossref.org/AccessIndicators.xsd');
 define('CROSSREF_XMLNS_REL' , 'http://www.crossref.org/relations.xsd');
 define('CROSSREF_XML_ROOT_ELEMENT' , 'doi_batch');
 
-use Illuminate\Database\Capsule\Manager as Capsule;
+use APP\facades\Repo;
+use PKP\i18n\LocaleConversion;
+use Illuminate\Support\Facades\DB;
+
 import('lib.pkp.classes.plugins.importexport.PKPImportExportDeployment');
 
 class CrossrefExportDeployment extends PKPImportExportDeployment {
@@ -97,7 +100,7 @@ class CrossrefExportDeployment extends PKPImportExportDeployment {
 	}
 
 	function createHeadNode($documentNode) {
-		$request = Application::getRequest();
+		$request = Application::get()->getRequest();
 		$press = $request->getPress();
 		$headNode = $documentNode->createElementNS($this->getNamespace(), 'head');
 		$timestamp = date("YmdHis")."000";
@@ -116,6 +119,7 @@ class CrossrefExportDeployment extends PKPImportExportDeployment {
 	}
 
 	function createBookNode($documentNode, $submission, $publication) {
+		error_log("Creating book node for submission ID: " . $submission->getId());
 		if ($submission->getWorkType() == WORK_TYPE_EDITED_VOLUME) {
 			$type = 'edited_book';
 		} else {
@@ -123,23 +127,35 @@ class CrossrefExportDeployment extends PKPImportExportDeployment {
 		}
 		$bookNode = $documentNode->createElement("book");
 		$bookNode->setAttribute('book_type', $type);
+		error_log("Book type: " . $type);
+		error_log("Book title: " . $publication->getLocalizedData('title'));
 		$bookNode->appendChild($this->createBookMetadataNode($documentNode, $submission, $publication));
 		$chapters = $publication->getData('chapters');
 		foreach ($chapters as $chapter) {
-			$bookNode->appendChild($this->createContentItemNode($documentNode, $submission, $publication, $chapter));
+			error_log("Adding chapter to book node: " . $chapter->getLocalizedData('title'));	
+			$doi = $chapter->getData('doiObject');
+			$doiUrl = $doi ? $doi->getData('doi') : '';
+			if (!empty($doiUrl)) {
+				$bookNode->appendChild($this->createContentItemNode($documentNode, $submission, $publication, $chapter));
+			}
 		}
 		return $bookNode;
 	}
 
 	function createBookMetadataNode($documentNode, $submission, $publication) {
-		$request = Application::getRequest();
+		$request = Application::get()->getRequest();
 		$press = $request->getPress();
 		$locale = $publication->getData('locale');
 
 		// If the book is part of series use book_series_metadata else use book_metadata
 		// Consider adding book_set_metadata option in cases where a series does not have an ISSN
-		$seriesDao = DAORegistry::getDAO('SeriesDAO'); /* @var $seriesDao SeriesDAO */
-		$series = $seriesDao->getById($publication->getData('seriesId'));
+		$seriesId = $publication->getData('seriesId');
+		if (is_null($seriesId)) {
+			error_log('seriesId is null for submission ID: ' . $submission->getId());
+		} else {
+			$series = Repo::section()->get($seriesId);
+		}
+
 		if ($series && ($series->getOnlineISSN() || $series->getPrintISSN())){
 			$bookMetadataNodeType = 'book_series_metadata';
 		} else{
@@ -147,7 +163,7 @@ class CrossrefExportDeployment extends PKPImportExportDeployment {
 		}
 
 		$bookMetadataNode = $documentNode->createElementNS($this->getNamespace(), $bookMetadataNodeType);
-		$bookMetadataNode->setAttribute('language', PKPLocale::getIso1FromLocale($locale));
+		$bookMetadataNode->setAttribute('language', LocaleConversion::getIso1FromLocale($locale));
 
 		// If a series, add series metadata
 		if ($series && ($series->getOnlineISSN() || $series->getPrintISSN())){
@@ -210,9 +226,9 @@ class CrossrefExportDeployment extends PKPImportExportDeployment {
 		$bookMetadataNode->appendChild($publisherNode);
 
 		// DOI data
-		$doi = $publication->getData('pub-id::doi');
+		$doi = $publication->getData('doiObject');
 		$doiDataNode = $documentNode->createElement("doi_data");
-		$doiDataNode->appendChild($node = $documentNode->createElement('doi', $this->xmlEscape($doi)));
+		$doiDataNode->appendChild($node = $documentNode->createElement('doi', $doi->getData('doi')));
 		$doiDataNode->appendChild($node = $documentNode->createElement('resource', $this->xmlEscape($request->url($press->getPath(), 'catalog', 'book', $submission->getBestId(), null, null, true))));
 		$bookMetadataNode->appendChild($doiDataNode);
 
@@ -220,46 +236,46 @@ class CrossrefExportDeployment extends PKPImportExportDeployment {
 	}
 
 	function createSeriesMetadataNode($documentNode, $series) {
-			$request = Application::getRequest();
-			$press = $request->getPress();
+		$request = Application::get()->getRequest();
+		$press = $request->getPress();
 
-			$seriesMetadataNode = $documentNode->createElement('series_metadata');
+		$seriesMetadataNode = $documentNode->createElement('series_metadata');
 
-			// Series title
-			$titlesNode = $documentNode->createElement("titles");
-			$titlesNode->appendChild($documentNode->createElement("title", $this->xmlEscape($series->getLocalizedData('title', $press->getPrimaryLocale())))); // Always use press primary locale, because only one series title can be attached to an ISSN in Crossref registry
-			$seriesMetadataNode->appendChild($titlesNode);
+		// Series title
+		$titlesNode = $documentNode->createElement("titles");
+		$titlesNode->appendChild($documentNode->createElement("title", $this->xmlEscape($series->getLocalizedData('title', $press->getPrimaryLocale())))); // Always use press primary locale, because only one series title can be attached to an ISSN in Crossref registry
+		$seriesMetadataNode->appendChild($titlesNode);
 
-			// Series ISSN
-			if ($series->getOnlineISSN()) {
-				$issnNode = $documentNode->createElement("issn", $this->xmlEscape($series->getOnlineISSN()));
-				$issnNode->setAttribute('media_type', 'electronic');
-			} elseif ($series->getPrintISSN()){
-				$issnNode = $documentNode->createElement("issn", $this->xmlEscape($series->getPrintISSN()));
-				$issnNode->setAttribute('media_type', 'print');
-			} else{
-				throw new \Exception("Series has no ISSN!");
-			}
-			$seriesMetadataNode->appendChild($issnNode);
+		// Series ISSN
+		if ($series->getOnlineISSN()) {
+			$issnNode = $documentNode->createElement("issn", $this->xmlEscape($series->getOnlineISSN()));
+			$issnNode->setAttribute('media_type', 'electronic');
+		} elseif ($series->getPrintISSN()){
+			$issnNode = $documentNode->createElement("issn", $this->xmlEscape($series->getPrintISSN()));
+			$issnNode->setAttribute('media_type', 'print');
+		} else{
+			throw new \Exception("Series has no ISSN!");
+		}
+		$seriesMetadataNode->appendChild($issnNode);
 
 		return $seriesMetadataNode;
 	}
 
 	function createContentItemNode($documentNode, $submission, $publication, $chapter) {
-		$request = Application::getRequest();
+		$request = Application::get()->getRequest();
 		$press = $request->getPress();
 		$locale = $publication->getData('locale');
 
 		$contentItemNode = $documentNode->createElement('content_item');
-		$contentItemNode->setAttribute('language', PKPLocale::getIso1FromLocale($locale));
+		$contentItemNode->setAttribute('language', LocaleConversion::getIso1FromLocale($locale));
 		$contentItemNode->setAttribute('component_type', 'chapter');
 
-		$chapterFiles = Capsule::table('submission_file_settings')
+		$chapterFiles = DB::table('submission_file_settings')
 			->where('setting_name', '=', 'chapterId')
 			->where('setting_value', '=', $chapter->getId())
 			->get();
 
-		if ($chapterFiles) {
+		if ($chapterFiles->isNotEmpty()) {
 			$contentItemNode->setAttribute('publication_type', 'full_text');
 		} elseif ($chapter->getLocalizedData('abstract', $locale)) {
 			$contentItemNode->setAttribute('publication_type', 'abstract_only');
@@ -268,16 +284,14 @@ class CrossrefExportDeployment extends PKPImportExportDeployment {
 		}
 
 		// Chapter authors
-		$chapterAuthorDao = DAORegistry::getDAO('ChapterAuthorDAO'); /** @var $chapterAuthorDao ChapterAuthorDAO */
-		if ($authors = $chapterAuthorDao->getAuthors($chapter->getData('publicationId'), $chapter->getId())->toArray()) {
-			$contentItemNode->appendChild($this->createContributorsNode($documentNode, $authors, $locale, true));
-		}
+		$authors = Repo::author()->getCollector()
+			->filterByChapterIds([$chapter->getId()])
+			->filterByPublicationIds([$chapter->getData('publicationId')])
+			->getMany()
+			->toArray();
 
-		// Abstract
-		if ($abstract = $chapter->getLocalizedData('abstract', $locale)) {
-			$abstractNode = $documentNode->createElementNS($this->getJATSNamespace(), 'jats:abstract');
-			$abstractNode->appendChild($node = $documentNode->createElementNS($this->getJATSNamespace(), 'jats:p', htmlspecialchars(html_entity_decode(strip_tags($abstract), ENT_COMPAT, 'UTF-8'), ENT_COMPAT, 'UTF-8')));
-			$contentItemNode->appendChild($abstractNode);
+		if (!empty($authors)) {
+			$contentItemNode->appendChild($this->createContributorsNode($documentNode, $authors, $locale, true));
 		}
 
 		// Chapter title
@@ -287,6 +301,13 @@ class CrossrefExportDeployment extends PKPImportExportDeployment {
 			$titlesNode->appendChild($node = $documentNode->createElement('subtitle', $this->xmlEscape($subtitle)));
 		}
 		$contentItemNode->appendChild($titlesNode);
+
+		// Abstract
+		if ($abstract = $chapter->getLocalizedData('abstract', $locale)) {
+			$abstractNode = $documentNode->createElementNS($this->getJATSNamespace(), 'jats:abstract');
+			$abstractNode->appendChild($node = $documentNode->createElementNS($this->getJATSNamespace(), 'jats:p', htmlspecialchars(html_entity_decode(strip_tags($abstract), ENT_COMPAT, 'UTF-8'), ENT_COMPAT, 'UTF-8')));
+			$contentItemNode->appendChild($abstractNode);
+		}
 
 		// Date published
 		$datePublished = $submission->getDatePublished();
@@ -298,10 +319,23 @@ class CrossrefExportDeployment extends PKPImportExportDeployment {
 		$contentItemNode->appendChild($publicationDateNode);
 
 		// DOI data
-		$doi = $chapter->getData('pub-id::doi');
+		$doi = $chapter->getData('doiObject');
+		$doiUrl = $doi ? $doi->getData('doi') : '';
 		$doiDataNode = $documentNode->createElement("doi_data");
-		$doiDataNode->appendChild($node = $documentNode->createElement('doi', $this->xmlEscape($doi)));
-		$doiDataNode->appendChild($node = $documentNode->createElement('resource', $this->xmlEscape($request->url($press->getPath(), 'catalog', 'book', $submission->getBestId(), null, null, true)))); // Use submission landing page while chapter landing page not available
+		$doiDataNode->appendChild($node = $documentNode->createElement('doi', $doiUrl));
+
+		// Generate the chapter URL
+		$chapterUrl = $request->url(
+			$press->getPath(),
+			'catalog',
+			'book',
+			[$submission->getBestId(), 'chapter', $chapter->getSourceChapterId()],
+			null,
+			null,
+			true
+		);
+		$doiDataNode->appendChild($node = $documentNode->createElement('resource', $this->xmlEscape($chapterUrl)));
+
 		$contentItemNode->appendChild($doiDataNode);
 
 		return $contentItemNode;
@@ -332,7 +366,7 @@ class CrossrefExportDeployment extends PKPImportExportDeployment {
 
 			// Check if both givenName and familyName is set for the submission language.
 			if (!empty($familyNames[$locale]) && !empty($givenNames[$locale])) {
-				$personNameNode->setAttribute('language', PKPLocale::getIso1FromLocale($locale));
+				$personNameNode->setAttribute('language', LocaleConversion::getIso1FromLocale($locale));
 				$personNameNode->appendChild($node = $documentNode->createElement('given_name', htmlspecialchars(ucfirst($givenNames[$locale]), ENT_COMPAT, 'UTF-8')));
 				$personNameNode->appendChild($node = $documentNode->createElement('surname', htmlspecialchars(ucfirst($familyNames[$locale]), ENT_COMPAT, 'UTF-8')));
 
@@ -345,7 +379,7 @@ class CrossrefExportDeployment extends PKPImportExportDeployment {
 						}
 
 						$nameNode = $documentNode->createElement('name');
-						$nameNode->setAttribute('language', PKPLocale::getIso1FromLocale($otherLocal));
+						$nameNode->setAttribute('language', LocaleConversion::getIso1FromLocale($otherLocal));
 
 						$nameNode->appendChild($node = $documentNode->createElement('surname', htmlspecialchars(ucfirst($familyName), ENT_COMPAT, 'UTF-8')));
 						if (isset($givenNames[$otherLocal]) && !empty($givenNames[$otherLocal])) {
@@ -357,7 +391,7 @@ class CrossrefExportDeployment extends PKPImportExportDeployment {
 				}
 
 			} elseif (!empty($givenNames[$locale])) {
-				$personNameNode->setAttribute('language', PKPLocale::getIso1FromLocale($locale));
+				$personNameNode->setAttribute('language', LocaleConversion::getIso1FromLocale($locale));
 				$personNameNode->appendChild($node = $documentNode->createElement('surname', htmlspecialchars(ucfirst($givenNames[$locale]), ENT_COMPAT, 'UTF-8')));
 
 
@@ -370,7 +404,7 @@ class CrossrefExportDeployment extends PKPImportExportDeployment {
 						}
 
 						$nameNode = $documentNode->createElement('name');
-						$nameNode->setAttribute('language', PKPLocale::getIso1FromLocale($otherLocal));
+						$nameNode->setAttribute('language', LocaleConversion::getIso1FromLocale($otherLocal));
 
 						$nameNode->appendChild($node = $documentNode->createElement('surname', htmlspecialchars(ucfirst($givenName), ENT_COMPAT, 'UTF-8')));
 						$altNameNode->appendChild($nameNode);
@@ -397,10 +431,11 @@ class CrossrefExportDeployment extends PKPImportExportDeployment {
 		return XMLNode::xmlentities($value, ENT_NOQUOTES);
 	}
 
-	function getContext() {
-		return $this->_context;
-	}
-
+	public function getContext(): Context
+    {
+        return $this->_context;
+    }
+	
 	function setContext($context) {
 		$this->_context = $context;
 	}

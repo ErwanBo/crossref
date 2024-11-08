@@ -1,7 +1,5 @@
 <?php
 
-use Illuminate\Database\Capsule\Manager as Capsule;
-
 import('lib.pkp.classes.plugins.ImportExportPlugin');
 import('plugins.importexport.crossref.CrossrefExportDeployment');
 define('CROSSREF_API_DEPOSIT_OK', 200);
@@ -9,7 +7,10 @@ define('CROSSREF_STATUS_FAILED', 'failed');
 define('CROSSREF_API_URL', 'https://api.crossref.org/v2/deposits');
 define('CROSSREF_API_URL_DEV', 'https://test.crossref.org/v2/deposits');
 define('EXPORT_STATUS_REGISTERED', 'registered');
-
+use APP\facades\Repo;
+use PKP\facades\Locale;
+use Illuminate\Support\Facades\DB;
+use PKP\db\DAORegistry;
 
 class CrossrefExportPlugin extends ImportExportPlugin {
 
@@ -56,7 +57,7 @@ class CrossrefExportPlugin extends ImportExportPlugin {
 	}
 
 	function getSettings(TemplateManager $templateMgr) {
-		$request = Application::getRequest();
+		$request = Application::get()->getRequest();
 		$press = $request->getPress();
 		$username = $this->getSetting($press->getId(), 'username');
 		$templateMgr->assign('username', $username);
@@ -82,26 +83,42 @@ class CrossrefExportPlugin extends ImportExportPlugin {
 		$username = $this->getSetting($context->getId(), 'username');
 		$password = $this->getSetting($context->getId(), 'password');
 
-		$submissionService = Services::get('submission');
-		$submissions = $submissionService->getMany([
-			'contextId' => $context->getId(),
-			'status' => STATUS_PUBLISHED,
-		]);
+		error_log("Context ID: " . $context->getId());
+		error_log("Username: " . $username);
+		error_log("Password: " . $password);
+
+		$collector = Repo::submission()->getCollector()
+	        ->filterByContextIds([$context->getId()])
+	        ->filterByStatus([Submission::STATUS_PUBLISHED]);
+			
+		// Log the details of the filtering criteria (cannot use toSql() method)
+		error_log("Filtering by context ID: " . $context->getId());
+		error_log("Filtering by status: " . Submission::STATUS_PUBLISHED);
+
+		$submissions = $collector->getMany();
+		
+		error_log("Number of submissions found: " . count($submissions));
+
 		$itemsQueue = [];
 		$itemsDeposited = [];
-		$locale = AppLocale::getLocale();
+		$locale = Locale::getLocale();
 
 		foreach ($submissions as $submission) {
 			$submissionId = $submission->getId();
+        	error_log("");
+        	error_log("Processing submission ID: " . $submissionId);
+			
 			$publication = $submission->getCurrentPublication();
-			$doi = $submission->getCurrentPublication()->getData('pub-id::doi');
+			$doi = $submission->getCurrentPublication()->getData('doiObject');
+			//error_log("DOI: " . var_export($doi, true));
 
-			$registeredDoi = Capsule::table('submission_settings')
+			$registeredDoi = DB::table('submission_settings')
 						->where('submission_id', '=', $submissionId)
 						->where('setting_name', '=', 'crossref::registeredDoi')
 						->value('setting_value');
+			//error_log("Registered DOI: " . var_export($registeredDoi, true));
 
-			$failedMsg = Capsule::table('submission_settings')
+			$failedMsg = DB::table('submission_settings')
 						->where('submission_id', '=', $submissionId)
 						->where('setting_name', '=', 'crossref::failedMsg')
 						->value('setting_value');
@@ -110,10 +127,14 @@ class CrossrefExportPlugin extends ImportExportPlugin {
 			$errors = [];
 
 			$chapters = $publication->getData('chapters');
+			
+			//error_log("chapters: " . var_export($chapters, true));
 			$chapterDois = [];
 			foreach ($chapters as $chapter) {
-				if ($chapter->getData('pub-id::doi')){
-					$chapterDois[] = $chapter->getData('pub-id::doi');
+				error_log("DOI OBJECT : ".var_export($chapter->getData('doiObject'), true));
+				if ($chapter->getData('doiObject')){
+					error_log("DOI OBJECT URL : ".var_export($chapter->getData('doiObject')->getData('doi'), true));
+					$chapterDois[] = $chapter->getData('doiObject')->getData('doi');
 				}
 			}
 
@@ -143,37 +164,53 @@ class CrossrefExportPlugin extends ImportExportPlugin {
 			}
 
 			if (!$username && !$password) {
-				 $errors[] = __('plugins.importexport.crossref.error.noUserCrecentials');
+				 $errors[] = __('');
 			}
 
 			if (!$context->getData('publisher')) {
 				 $errors[] = __('plugins.importexport.crossref.error.noPublisher');
 			}
 
-			$seriesDao = DAORegistry::getDAO('SeriesDAO'); /* @var $seriesDao SeriesDAO */
-			if ($series = $seriesDao->getById($publication->getData('seriesId'))){
+			// Remplacez l'utilisation de SeriesDAO par Repo::section()
+			$seriesId = $publication->getData('seriesId');
+			$series = $seriesId ? Repo::section()->get($seriesId) : null;
+
+			if ($series) {
 				if (!$series->getOnlineISSN() && !$series->getPrintISSN()) {
 					$notices[] = __('plugins.importexport.crossref.error.noIssn');
 				}
 			}
 
-			if ($doi and $registeredDoi) {
+			$userGroups = Repo::userGroup()->getCollector()
+            ->filterByContextIds([$submission->getData('contextId')])
+            ->getMany();
+
+
+			$doi = $publication->getData('doiObject');
+			if ($doi instanceof \PKP\doi\Doi) {
+				$doiString = $doi->getDoi(); // ou toute autre méthode qui retourne le DOI comme chaîne
+			} else {
+				$doiString = ''; // ou une valeur par défaut
+			}
+
+			if ($doiString and $registeredDoi) {
 				$itemsDeposited[] = array(
 					'id' => $submissionId,
 					'title' => $submission->getLocalizedTitle($locale),
-					'authors' => $submission->getAuthorString($locale),
-					'pubId' => $doi,
+					'authors' => $publication->getAuthorString($userGroups),
+					'pubId' => $doiString,
 					'chapterPubIds' => $chapterDois,
 					'notices' => $notices,
 					'errors' => $errors,
 				);
+				error_log("Added to itemsDeposited: " . $submissionId);
 			}
 			if ($doi and !$registeredDoi) {
 				$itemsQueue[] = array(
 					'id' => $submissionId,
 					'title' => $submission->getLocalizedTitle($locale),
-					'authors' => $submission->getAuthorString($locale),
-					'pubId' => $doi,
+					'authors' => $publication->getAuthorString($userGroups),
+					'pubId' => $doiString,
 					'chapterPubIds' => $chapterDois,
 					'notices' => $notices,
 					'errors' => $errors,
@@ -194,13 +231,12 @@ class CrossrefExportPlugin extends ImportExportPlugin {
 	function actionSubmissions($request, $action) {
 		$submissionIds = (array)$request->getUserVar('submission');
 		import('lib.pkp.classes.file.FileManager');
-		$submissionDao = DAORegistry::getDAO('SubmissionDAO');
-		$press = $request->getPress();
 		$fileManager = new FileManager();
 		$result = array();
+		$press = $request->getPress();
 		foreach ($submissionIds as $submissionId) {
 			$deployment = new CrossrefExportDeployment($request, $this);
-			$submission = $submissionDao->getById($submissionId, $request->getContext()->getId());
+			$submission = Repo::submission()->get($submissionId);
 			$publication = $submission->getCurrentPublication();
 			$doi = $publication->getStoredPubId('doi');
 			if ($doi) {
@@ -314,13 +350,13 @@ class CrossrefExportPlugin extends ImportExportPlugin {
 	function updateDepositStatus($context, $submission, $status, $batchId, $failedMsg = null) {
 		assert(is_a($submission, 'Submission'));
 
-		Capsule::table('submission_settings')
+		DB::table('submission_settings')
 			->where('submission_id', '=', $submission->getId())
 			->where('setting_name', '=', 'crossref::failedMsg')
 			->delete();
 
 		if ($failedMsg) {
-			Capsule::table('submission_settings')->insert([
+			DB::table('submission_settings')->insert([
 				'submission_id' => $submission->getId(),
 				'locale' => '',
 				'setting_name' => 'crossref::failedMsg',
@@ -338,12 +374,12 @@ class CrossrefExportPlugin extends ImportExportPlugin {
 		$registeredDoi = $submission->getStoredPubId('doi');
 		assert(!empty($registeredDoi));
 
-		Capsule::table('submission_settings')
+		DB::table('submission_settings')
 			->where('submission_id', '=', $submission->getId())
 			->where('setting_name', '=', 'crossref::registeredDoi')
 			->delete();
 
-		Capsule::table('submission_settings')->insert([
+		DB::table('submission_settings')->insert([
 			'submission_id' => $submission->getId(),
 			'locale' => '',
 			'setting_name' => 'crossref::registeredDoi',
@@ -397,11 +433,12 @@ class CrossrefExportPlugin extends ImportExportPlugin {
 		} else {
 			$params = null;
 		}
+		$params = $param ? array('param' => $param) : array();
 		$notificationManager->createTrivialNotification(
-				$user->getId(),
-				$notificationType,
-				array('contents' => __($message, $params))
-				);
+			$user->getId(),
+			$notificationType,
+			array('contents' => __($message, $params))
+		);
 	}
 
 	public static function logFilePath() {
